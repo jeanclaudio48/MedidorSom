@@ -10,8 +10,10 @@ import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
@@ -28,12 +30,14 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -50,6 +54,7 @@ import kotlin.math.sqrt
 class Palette(night: Boolean) {
     val bg = Color.parseColor(if (night) "#0F1317" else "#EDF1F4")
     val card = Color.parseColor(if (night) "#182027" else "#FFFFFF")
+    val tile = Color.parseColor(if (night) "#1F2A33" else "#E3E9EE")
     val ink = Color.parseColor(if (night) "#E8EEF2" else "#192127")
     val muted = Color.parseColor(if (night) "#8C9BA6" else "#5A6873")
     val line = Color.parseColor(if (night) "#2B3741" else "#D3DBE1")
@@ -61,14 +66,46 @@ class Palette(night: Boolean) {
     val btnInk = Color.parseColor(if (night) "#0F1317" else "#FFFFFF")
 }
 
+fun withAlpha(c: Int, a: Int): Int = (c and 0x00FFFFFF) or (a shl 24)
+
+private fun fmt(v: Float): String =
+    if (v <= -119f) "--" else String.format("%.1f", v).replace('-', '−')
+
 // ---------------------------------------------------------------------------
-// Barra de nível horizontal com faixa ideal e marcador de pico
+// Logo do cabeçalho (mesmas barras do ícone do app)
+// ---------------------------------------------------------------------------
+class LogoView(c: Context, private val p: Palette) : View(c) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val heights = floatArrayOf(0.38f, 0.70f, 1.0f, 0.60f, 0.44f)
+
+    override fun onDraw(cv: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val bw = w * 0.12f
+        val gap = w * 0.075f
+        val x0 = (w - (5 * bw + 4 * gap)) / 2f
+        for (i in 0 until 5) {
+            val hh = heights[i] * h * 0.86f
+            val x = x0 + i * (bw + gap)
+            paint.color = when (i) {
+                2 -> p.ink
+                1, 3 -> p.ok
+                else -> withAlpha(p.ok, 150)
+            }
+            cv.drawRoundRect(x, (h - hh) / 2f, x + bw, (h + hh) / 2f, bw / 2f, bw / 2f, paint)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Medidor segmentado (estilo LED) com zonas de cor e marcador de pico
 // ---------------------------------------------------------------------------
 class MeterView(c: Context, private val p: Palette) : View(c) {
     var rms = -120f
     var peak = -120f
-    var color = p.muted
 
+    private val segs = 40
+    private val step = 60f / segs // 1,5 dB por segmento
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         this.color = p.muted
@@ -76,58 +113,54 @@ class MeterView(c: Context, private val p: Palette) : View(c) {
     }
 
     private fun dp(v: Float) = v * resources.displayMetrics.density
-    private fun xOf(d: Float, w: Float) = ((d.coerceIn(-60f, 0f) + 60f) / 60f) * w
+
+    private fun zone(d: Float): Int = when {
+        d < -18f -> p.low
+        d < -6f -> p.ok
+        d < -2f -> p.warn
+        else -> p.bad
+    }
 
     override fun onDraw(cv: Canvas) {
         val w = width.toFloat()
-        val top = dp(6f)
-        val bh = dp(26f)
-        val r = bh / 2f
+        val top = dp(8f)
+        val bh = dp(30f)
+        val gap = dp(2f)
+        val segW = (w - gap * (segs - 1)) / segs
+        val r = dp(3f)
 
         paint.style = Paint.Style.FILL
-        paint.color = p.line
-        cv.drawRoundRect(0f, top, w, top + bh, r, r, paint)
-
-        // faixa recomendada para o pico (-18 a -6 dBFS)
-        paint.color = p.ok
-        paint.alpha = 70
-        cv.drawRect(xOf(-18f, w), top, xOf(-6f, w), top + bh, paint)
-        paint.alpha = 255
-
-        // barra do nível médio
-        val fx = xOf(rms, w)
-        if (rms > -59f && fx > dp(10f)) {
-            paint.color = color
-            cv.drawRoundRect(0f, top + dp(5f), fx, top + bh - dp(5f), dp(8f), dp(8f), paint)
+        for (i in 0 until segs) {
+            val mid = -60f + i * step + step / 2f
+            val x0 = i * (segW + gap)
+            paint.color = withAlpha(zone(mid), if (rms >= mid) 255 else 46)
+            cv.drawRoundRect(x0, top, x0 + segW, top + bh, r, r, paint)
         }
 
-        // marcador de pico
         if (peak > -59f) {
-            val px = min(w - dp(2f), max(dp(2f), xOf(peak, w)))
+            val i = ((peak + 60f) / step).toInt().coerceIn(0, segs - 1)
+            val x0 = i * (segW + gap)
             paint.color = p.ink
-            cv.drawRect(px - dp(1.5f), top - dp(3f), px + dp(1.5f), top + bh + dp(3f), paint)
+            cv.drawRoundRect(x0, top - dp(4f), x0 + segW, top + bh + dp(4f), r, r, paint)
         }
 
-        // escala
-        paint.color = p.muted
         var d = -60
         while (d <= 0) {
-            val x = xOf(d.toFloat(), w)
-            cv.drawRect(min(w - 1f, x), top + bh + dp(3f), min(w - 1f, x) + 1f, top + bh + dp(8f), paint)
+            val x = ((d + 60f) / 60f) * w
             val label = if (d == 0) "0" else d.toString().replace('-', '−')
             txt.textAlign = when (d) {
                 -60 -> Paint.Align.LEFT
                 0 -> Paint.Align.RIGHT
                 else -> Paint.Align.CENTER
             }
-            cv.drawText(label, x, top + bh + dp(8f) + txt.textSize + dp(2f), txt)
+            cv.drawText(label, x, top + bh + dp(6f) + txt.textSize, txt)
             d += 10
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Gráfico dos últimos 30 segundos (20 pontos por segundo)
+// Gráfico dos últimos 30 segundos (20 pontos por segundo) com degradê
 // ---------------------------------------------------------------------------
 class HistoryView(c: Context, private val p: Palette) : View(c) {
     private val n = 600
@@ -137,6 +170,9 @@ class HistoryView(c: Context, private val p: Palette) : View(c) {
     private var size = 0
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val path = Path()
+    private val area = Path()
+    private var shader: LinearGradient? = null
+    private var shaderH = 0f
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         this.color = p.muted
         textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 10f, resources.displayMetrics)
@@ -173,12 +209,12 @@ class HistoryView(c: Context, private val p: Palette) : View(c) {
         val h = height.toFloat()
         fun y(d: Float): Float = h - ((d.coerceIn(-60f, 0f) + 60f) / 60f) * h
 
+        // faixa ideal (-18 a -6 dBFS)
         paint.style = Paint.Style.FILL
-        paint.color = p.ok
-        paint.alpha = 38
+        paint.color = withAlpha(p.ok, 36)
         cv.drawRect(0f, y(-6f), w, y(-18f), paint)
-        paint.alpha = 255
 
+        // grade
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(1f)
         paint.color = p.line
@@ -191,29 +227,82 @@ class HistoryView(c: Context, private val p: Palette) : View(c) {
         }
         if (size < 2) return
 
-        fun line(arr: FloatArray, sw: Float, col: Int, alpha: Int) {
-            path.reset()
+        fun trace(arr: FloatArray, out: Path) {
+            out.reset()
             for (i in 0 until size) {
                 val idx = (head - size + i + n) % n
                 val x = w * (n - size + i) / (n - 1f)
                 val yy = y(arr[idx])
-                if (i == 0) path.moveTo(x, yy) else path.lineTo(x, yy)
+                if (i == 0) out.moveTo(x, yy) else out.lineTo(x, yy)
             }
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = sw
-            paint.strokeJoin = Paint.Join.ROUND
-            paint.color = col
-            paint.alpha = alpha
-            cv.drawPath(path, paint)
-            paint.alpha = 255
         }
-        line(peakA, dp(1f), p.ink, 120)
-        line(rmsA, dp(2.5f), p.ink, 255)
+
+        // pico (linha fina)
+        trace(peakA, path)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(1f)
+        paint.strokeJoin = Paint.Join.ROUND
+        paint.color = withAlpha(p.ink, 110)
+        cv.drawPath(path, paint)
+
+        // nível médio: área com degradê + linha
+        trace(rmsA, path)
+        area.set(path)
+        area.lineTo(w, h)
+        area.lineTo(w * (n - size) / (n - 1f), h)
+        area.close()
+        if (shader == null || shaderH != h) {
+            shader = LinearGradient(0f, 0f, 0f, h, withAlpha(p.ok, 120), withAlpha(p.ok, 0), Shader.TileMode.CLAMP)
+            shaderH = h
+        }
+        paint.style = Paint.Style.FILL
+        paint.shader = shader
+        cv.drawPath(area, paint)
+        paint.shader = null
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(2.5f)
+        paint.color = p.ok
+        cv.drawPath(path, paint)
     }
 }
 
-private fun fmt(v: Float): String =
-    if (v <= -119f) "--" else String.format("%.1f", v).replace('-', '−')
+// ---------------------------------------------------------------------------
+// Botão com ícone + texto
+// ---------------------------------------------------------------------------
+class IconButton(c: Context, p: Palette, filled: Boolean) : LinearLayout(c) {
+    private val icon = ImageView(c)
+    private val caption = TextView(c)
+
+    init {
+        val d = resources.displayMetrics.density
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        isClickable = true
+        isFocusable = true
+        val shape = GradientDrawable().apply {
+            setColor(if (filled) p.btn else p.card)
+            cornerRadius = 16f * d
+            if (!filled) setStroke((1f * d).roundToInt(), p.line)
+        }
+        background = RippleDrawable(ColorStateList.valueOf(Color.argb(70, 128, 128, 128)), shape, null)
+        val fg = if (filled) p.btnInk else p.ink
+        icon.setColorFilter(fg)
+        caption.setTextColor(fg)
+        caption.textSize = 16f
+        caption.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        val side = (22f * d).roundToInt()
+        addView(icon, LayoutParams(side, side))
+        addView(caption, LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            .apply { leftMargin = (8f * d).roundToInt() })
+    }
+
+    fun set(iconRes: Int, text: String) {
+        icon.setImageResource(iconRes)
+        caption.text = text
+        contentDescription = text
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tela principal
@@ -238,13 +327,14 @@ class MainActivity : Activity() {
     private lateinit var tvStatus: TextView
     private lateinit var tvTip: TextView
     private lateinit var tvSource: TextView
+    private lateinit var tvChip: TextView
     private lateinit var tvPeakHold: TextView
     private lateinit var tvPeakMax: TextView
     private lateinit var tvClips: TextView
+    private lateinit var tvMicName: TextView
     private lateinit var meter: MeterView
     private lateinit var history: HistoryView
-    private lateinit var btnMic: Button
-    private lateinit var btnToggle: Button
+    private lateinit var btnToggle: IconButton
     private lateinit var banner: LinearLayout
     private lateinit var tvBanner: TextView
     private lateinit var btnBanner: Button
@@ -256,6 +346,7 @@ class MainActivity : Activity() {
     private var waitingPermission = false
     private var deadRetries = 0
     private var bannerMode = BANNER_NONE
+    private var pillColor = 0
 
     private var devices: List<AudioDeviceInfo> = emptyList()
     private var deviceNames: List<String> = emptyList()
@@ -542,22 +633,21 @@ class MainActivity : Activity() {
                 "$name $k"
             } else name
         }
-        updateMicButton()
+        updateMicName()
     }
 
     private fun onDevicesChanged() {
         refreshDevices()
         if (selectedDeviceId != -1 && devices.none { it.id == selectedDeviceId }) {
             selectedDeviceId = -1
-            updateMicButton()
+            updateMicName()
             if (worker != null) restartCapture()
         }
     }
 
-    private fun updateMicButton() {
+    private fun updateMicName() {
         val idx = devices.indexOfFirst { it.id == selectedDeviceId }
-        val name = if (selectedDeviceId == -1 || idx < 0) "Automático" else deviceNames[idx]
-        btnMic.text = "Microfone: $name"
+        tvMicName.text = if (selectedDeviceId == -1 || idx < 0) "Automático" else deviceNames[idx]
     }
 
     private fun chooseMic() {
@@ -567,7 +657,7 @@ class MainActivity : Activity() {
             .setTitle("Microfone de entrada")
             .setSingleChoiceItems(items, checked) { dialog, which ->
                 selectedDeviceId = if (which == 0) -1 else devices[which - 1].id
-                updateMicButton()
+                updateMicName()
                 dialog.dismiss()
                 if (worker != null) restartCapture()
             }
@@ -620,6 +710,13 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun setPill(color: Int) {
+        if (color != pillColor) {
+            pillColor = color
+            tvStatus.background = rounded(withAlpha(color, 40), 20)
+        }
+    }
+
     private fun render(now: Long) {
         val (status, tip, color) = computeStatus(now)
         tvRms.text = fmt(rmsDisp)
@@ -628,10 +725,10 @@ class MainActivity : Activity() {
         tvClips.text = clips.toString()
         tvStatus.text = status
         tvStatus.setTextColor(color)
+        setPill(color)
         tvTip.text = tip
         meter.rms = rmsDisp
         meter.peak = peakHold
-        meter.color = color
         meter.invalidate()
     }
 
@@ -646,15 +743,29 @@ class MainActivity : Activity() {
         tvClips.text = "0"
     }
 
+    private fun updateChip() {
+        val (t, c) = when {
+            bannerMode != BANNER_NONE -> Pair("Atenção", pal.bad)
+            worker != null -> Pair("Medindo", pal.ok)
+            userPaused -> Pair("Pausado", pal.muted)
+            else -> Pair("Parado", pal.muted)
+        }
+        tvChip.text = "●  $t"
+        tvChip.setTextColor(c)
+        tvChip.background = rounded(withAlpha(c, 38), 20)
+    }
+
     private fun updateUi() {
         val running = worker != null
-        btnToggle.text = if (running) "Pausar" else "Iniciar"
+        btnToggle.set(if (running) R.drawable.ic_pause else R.drawable.ic_play,
+            if (running) "Pausar" else "Iniciar")
         if (!running) {
             rmsDisp = -120f
             peakHold = -120f
             tvRms.text = "--"
             tvPeakHold.text = "--"
             tvStatus.setTextColor(pal.muted)
+            setPill(pal.muted)
             when {
                 bannerMode == BANNER_PERMISSION -> {
                     tvStatus.text = "Sem permissão"
@@ -671,9 +782,9 @@ class MainActivity : Activity() {
             }
             meter.rms = -120f
             meter.peak = -120f
-            meter.color = pal.muted
             meter.invalidate()
         }
+        updateChip()
     }
 
     // ------------------------------------------------------------------ avisos
@@ -693,11 +804,13 @@ class MainActivity : Activity() {
             btnBanner.visibility = View.GONE
         }
         banner.visibility = View.VISIBLE
+        updateChip()
     }
 
     private fun hideBanner() {
         bannerMode = BANNER_NONE
         banner.visibility = View.GONE
+        updateChip()
     }
 
     // ---------------------------------------------------------------------- UI
@@ -720,31 +833,34 @@ class MainActivity : Activity() {
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(18), dp(16), dp(18), dp(16))
-        background = rounded(pal.card, 18, pal.line)
+        setPadding(dp(20), dp(18), dp(20), dp(18))
+        background = rounded(pal.card, 24, pal.line)
     }
 
-    private fun button(t: String, filled: Boolean): Button = Button(this).apply {
+    private fun outlinedButton(t: String): Button = Button(this).apply {
         text = t
         isAllCaps = false
-        textSize = 16f
+        textSize = 15f
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         stateListAnimator = null
-        setTextColor(if (filled) pal.btnInk else pal.ink)
-        val shape = rounded(if (filled) pal.btn else pal.card, 14, if (filled) 0 else pal.line)
+        setTextColor(pal.ink)
+        val shape = rounded(pal.card, 14, pal.line)
         background = RippleDrawable(ColorStateList.valueOf(Color.argb(70, 128, 128, 128)), shape, null)
-        setPadding(dp(16), 0, dp(16), 0)
     }
 
     private fun lp(w: Int, h: Int, top: Int = 0, weight: Float = 0f): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(w, h, weight).apply { topMargin = dp(top) }
 
-    private fun statColumn(caption: String, initial: String): Pair<LinearLayout, TextView> {
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val value = label(initial, 22f, pal.ink, "sans-serif-medium")
-        col.addView(value)
-        col.addView(label(caption, 12f, pal.muted))
-        return Pair(col, value)
+    private fun statTile(caption: String): Pair<LinearLayout, TextView> {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = rounded(pal.tile, 16)
+        }
+        val value = label("--", 20f, pal.ink, "sans-serif-medium")
+        tile.addView(value)
+        tile.addView(label(caption, 11f, pal.muted))
+        return Pair(tile, value)
     }
 
     private fun buildUi() {
@@ -758,24 +874,39 @@ class MainActivity : Activity() {
         val scroll = ScrollView(this)
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setPadding(dp(16), dp(16), dp(16), dp(20))
         }
         scroll.addView(col, ViewGroup.LayoutParams(match, wrap))
 
-        // cabeçalho
-        col.addView(label("Medidor de som", 26f, pal.ink, "sans-serif-medium"))
-        tvSource = label("Fonte: aguardando", 13f, pal.muted)
-        col.addView(tvSource, lp(match, wrap, 2))
+        // cabeçalho: logo + título + chip de estado
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(LogoView(this, pal), LinearLayout.LayoutParams(dp(44), dp(44)))
+        val titles = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, dp(8), 0)
+        }
+        titles.addView(label("Medidor de som", 22f, pal.ink, "sans-serif-medium"))
+        tvSource = label("Fonte: aguardando", 12f, pal.muted)
+        titles.addView(tvSource)
+        header.addView(titles, LinearLayout.LayoutParams(0, wrap, 1f))
+        tvChip = label("", 12f, pal.muted, "sans-serif-medium").apply {
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+        header.addView(tvChip)
+        col.addView(header, lp(match, wrap))
 
         // aviso (permissão, silêncio, erro)
         banner = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = rounded(pal.card, 16, pal.bad)
+            background = rounded(withAlpha(pal.bad, 28), 18, pal.bad)
             visibility = View.GONE
         }
         tvBanner = label("", 14f, pal.ink)
-        btnBanner = button("Permitir microfone", false).apply {
+        btnBanner = outlinedButton("Permitir microfone").apply {
             setOnClickListener {
                 if (!hasPermission()) {
                     if (!askedPermission || shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
@@ -796,34 +927,35 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.BOTTOM
         }
-        tvRms = label("--", 64f, pal.ink, "sans-serif-light")
-        val unit = label("dBFS", 16f, pal.muted).apply { setPadding(dp(8), 0, 0, dp(12)) }
+        tvRms = label("--", 72f, pal.ink, "sans-serif-light")
+        val unit = label("dBFS", 16f, pal.muted).apply { setPadding(dp(8), 0, 0, dp(14)) }
         row.addView(tvRms)
         row.addView(unit)
         cardMain.addView(row)
         cardMain.addView(label("Nível médio (RMS)", 13f, pal.muted))
-        tvStatus = label("", 21f, pal.ink, "sans-serif-medium")
-        cardMain.addView(tvStatus, lp(match, wrap, 12))
+        tvStatus = label("", 17f, pal.ink, "sans-serif-medium").apply {
+            setPadding(dp(14), dp(7), dp(14), dp(7))
+        }
+        cardMain.addView(tvStatus, lp(wrap, wrap, 14))
         tvTip = label("", 15f, pal.muted).apply { minLines = 2 }
-        cardMain.addView(tvTip, lp(match, wrap, 2))
+        cardMain.addView(tvTip, lp(match, wrap, 8))
         meter = MeterView(this, pal)
-        cardMain.addView(meter, lp(match, dp(64), 14))
-        col.addView(cardMain, lp(match, wrap, 14))
+        cardMain.addView(meter, lp(match, dp(64), 12))
+        col.addView(cardMain, lp(match, wrap, 16))
 
-        // estatísticas
-        val cardStats = card()
+        // estatísticas em três blocos
         val statsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val s1 = statColumn("Pico recente (dBFS)", "--")
-        val s2 = statColumn("Pico máximo (dBFS)", "--")
-        val s3 = statColumn("Estouros", "0")
+        val s1 = statTile("Pico recente (dBFS)")
+        val s2 = statTile("Pico máximo (dBFS)")
+        val s3 = statTile("Estouros")
         tvPeakHold = s1.second
         tvPeakMax = s2.second
         tvClips = s3.second
+        tvClips.text = "0"
         statsRow.addView(s1.first, lp(0, wrap, 0, 1f))
-        statsRow.addView(s2.first, lp(0, wrap, 0, 1f))
+        statsRow.addView(s2.first, lp(0, wrap, 0, 1f).apply { leftMargin = dp(8); rightMargin = dp(8) })
         statsRow.addView(s3.first, lp(0, wrap, 0, 1f))
-        cardStats.addView(statsRow)
-        col.addView(cardStats, lp(match, wrap, 12))
+        col.addView(statsRow, lp(match, wrap, 12))
 
         // gráfico
         val cardHist = card()
@@ -834,11 +966,34 @@ class MainActivity : Activity() {
         col.addView(cardHist, lp(match, wrap, 12))
 
         // seleção de microfone
-        btnMic = button("Microfone: Automático", false).apply {
-            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        val micTile = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            isClickable = true
+            isFocusable = true
+            background = RippleDrawable(ColorStateList.valueOf(Color.argb(70, 128, 128, 128)),
+                rounded(pal.card, 20, pal.line), null)
             setOnClickListener { chooseMic() }
         }
-        col.addView(btnMic, lp(match, dp(54), 12))
+        val micIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_mic)
+            setColorFilter(pal.ink)
+        }
+        micTile.addView(micIcon, LinearLayout.LayoutParams(dp(24), dp(24)))
+        val micTexts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), 0, dp(8), 0)
+        }
+        micTexts.addView(label("Entrada de áudio", 11f, pal.muted))
+        tvMicName = label("Automático", 15f, pal.ink, "sans-serif-medium").apply {
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        micTexts.addView(tvMicName)
+        micTile.addView(micTexts, LinearLayout.LayoutParams(0, wrap, 1f))
+        micTile.addView(label("›", 26f, pal.muted))
+        col.addView(micTile, lp(match, wrap, 12))
 
         col.addView(label(
             "dBFS mostra quanto do limite digital está em uso (0 é o máximo). Não é dB SPL. Nada é gravado nem enviado.",
@@ -850,7 +1005,8 @@ class MainActivity : Activity() {
             setBackgroundColor(pal.card)
             setPadding(dp(16), dp(12), dp(16), dp(12))
         }
-        btnToggle = button("Iniciar", true).apply {
+        btnToggle = IconButton(this, pal, true).apply {
+            set(R.drawable.ic_play, "Iniciar")
             setOnClickListener {
                 if (worker != null) {
                     userPaused = true
@@ -864,9 +1020,12 @@ class MainActivity : Activity() {
                 }
             }
         }
-        val btnReset = button("Zerar picos", false).apply { setOnClickListener { resetPeaks() } }
-        bar.addView(btnToggle, lp(0, dp(54), 0, 2f))
-        bar.addView(btnReset, lp(0, dp(54), 0, 1f).apply { leftMargin = dp(10) })
+        val btnReset = IconButton(this, pal, false).apply {
+            set(R.drawable.ic_reset, "Zerar")
+            setOnClickListener { resetPeaks() }
+        }
+        bar.addView(btnToggle, lp(0, dp(56), 0, 2f))
+        bar.addView(btnReset, lp(0, dp(56), 0, 1f).apply { leftMargin = dp(10) })
 
         outer.addView(scroll, LinearLayout.LayoutParams(match, 0, 1f))
         outer.addView(bar, LinearLayout.LayoutParams(match, wrap))
